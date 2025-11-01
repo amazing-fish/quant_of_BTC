@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import itertools
+import logging
 import math
 import os
 import time
@@ -55,7 +56,21 @@ INTERVALS_MINUTES: Dict[str, int] = {
     "1d": 1440,
 }
 
+LOGGER = logging.getLogger(__name__)
 SESSION = requests.Session()
+
+
+def configure_logging(level: str = "INFO") -> None:
+    """配置全局日志。"""
+
+    resolved = getattr(logging, level.upper(), logging.INFO)
+    logging.basicConfig(
+        level=resolved,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        force=True,
+    )
+    LOGGER.setLevel(resolved)
 
 
 def ensure_outputs() -> None:
@@ -149,7 +164,7 @@ def fetch_klines(
                 start_ms = next_open
                 time.sleep(0.2)
     except Exception as exc:  # pragma: no cover - 网络异常时触发
-        print("❌ 数据获取失败:", exc)
+        LOGGER.error("数据获取失败: %s", exc)
         return pd.DataFrame()
 
     if not frames:
@@ -161,7 +176,7 @@ def fetch_klines(
         .sort_values("open_time")
         .reset_index(drop=True)
     )
-    print(f"✅ 获取K线: {len(result)}")
+    LOGGER.info("获取K线成功: %d 条", len(result))
     return result
 
 
@@ -273,10 +288,10 @@ def adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
 class StrategyConfig:
     """策略参数。"""
 
-    fast: int = 30
-    slow: int = 90
-    rsi_long_min: float = 55.0
-    adx_min: float = 18.0
+    fast: int = 24
+    slow: int = 100
+    rsi_long_min: float = 63.0
+    adx_min: float = 20.0
     cross_buffer_atr: float = 0.28
     atr_sl_mult: float = 2.5
     atr_tp1_mult: float = 2.0
@@ -311,6 +326,44 @@ class BrokerConfig:
     fee_rate: float = 0.001
     slippage_bp: float = 1.0
     accounting: str = "spot"  # spot | futures
+
+
+@dataclass
+class PositionState:
+    """当前仓位状态。"""
+
+    side: Optional[str] = None
+    qty: float = 0.0
+    entry_px: float = 0.0
+    entry_ts: Optional[pd.Timestamp] = None
+    stop: float = float("nan")
+    tp1: float = float("nan")
+    tp2: float = float("nan")
+    tp1_done: bool = False
+    bars_in_trade: int = 0
+    entry_fee_total: float = 0.0
+    entry_fee_remain: float = 0.0
+
+    def reset(self) -> None:
+        """重置仓位状态。"""
+
+        self.side = None
+        self.qty = 0.0
+        self.entry_px = 0.0
+        self.entry_ts = None
+        self.stop = float("nan")
+        self.tp1 = float("nan")
+        self.tp2 = float("nan")
+        self.tp1_done = False
+        self.bars_in_trade = 0
+        self.entry_fee_total = 0.0
+        self.entry_fee_remain = 0.0
+
+    @property
+    def is_active(self) -> bool:
+        """是否持有仓位。"""
+
+        return self.side is not None and self.qty > 0
 
 
 @dataclass
@@ -361,6 +414,7 @@ class Backtester:
         self.b = broker
         self.interval = interval
         self.mins = INTERVALS_MINUTES[interval]
+        self.state = PositionState()
         self._prepare_indicators()
 
     # --- 预处理 ---
@@ -395,30 +449,21 @@ class Backtester:
         self.df["long_signal"] = cross_up & buffer_ok & regime_ok & power_ok & vol_ok & rsi_ok
 
     # --- 工具函数 ---
-    def _mark_equity(self, position: Optional[str], qty: float, entry_px: float, price: float) -> float:
+    def _mark_equity(self, price: float) -> float:
         """按当前市价估算权益。"""
 
         cash = self.cash
-        if position == "long":
+        state = self.state
+        if state.side == "long":
             if self.mode == "spot":
-                return cash + qty * price
-            return cash + qty * (price - entry_px)
+                return cash + state.qty * price
+            return cash + state.qty * (price - state.entry_px)
         return cash
 
     def _reset_state(self) -> None:
         """重置持仓相关变量。"""
 
-        self.position: Optional[str] = None
-        self.qty: float = 0.0
-        self.entry_px: float = 0.0
-        self.entry_ts: Optional[pd.Timestamp] = None
-        self.stop: float = math.nan
-        self.tp1: float = math.nan
-        self.tp2: float = math.nan
-        self.tp1_done: bool = False
-        self.bars_in_trade: int = 0
-        self.entry_fee_total: float = 0.0
-        self.entry_fee_remain: float = 0.0
+        self.state.reset()
 
     def _record_trade(
         self,
@@ -430,30 +475,31 @@ class Backtester:
     ) -> None:
         """记录成交并更新资金。"""
 
+        state = self.state
         fee_rate = self.b.fee_rate
         if self.mode == "spot":
             proceeds = qty * exit_px
             exit_fee = proceeds * fee_rate
             self.cash += proceeds - exit_fee
-            gross = (exit_px - self.entry_px) * qty
+            gross = (exit_px - state.entry_px) * qty
             pnl = gross - entry_fee_alloc - exit_fee
         else:
             exit_fee = abs(qty) * exit_px * fee_rate
-            gross = (exit_px - self.entry_px) * qty
+            gross = (exit_px - state.entry_px) * qty
             self.cash += gross - exit_fee
             pnl = gross - entry_fee_alloc - exit_fee
 
         self.trades.append(
             Trade(
-                self.entry_ts or exit_ts,
+                state.entry_ts or exit_ts,
                 exit_ts,
-                self.position or "long",
-                self.entry_px,
+                state.side or "long",
+                state.entry_px,
                 exit_px,
                 qty,
-                self.stop,
-                self.tp1,
-                self.tp2,
+                state.stop,
+                state.tp1,
+                state.tp2,
                 pnl,
                 entry_fee_alloc + exit_fee,
                 reason,
@@ -461,7 +507,7 @@ class Backtester:
                 exit_fee,
             )
         )
-        self.entry_fee_remain = max(0.0, self.entry_fee_remain - entry_fee_alloc)
+        state.entry_fee_remain = max(0.0, state.entry_fee_remain - entry_fee_alloc)
         self.loss_streak = self.loss_streak + 1 if pnl <= 0 else 0
 
     def run(self) -> BacktestResult:
@@ -485,57 +531,59 @@ class Backtester:
         peak = self.cash
 
         df = self.df
+        state = self.state
         for i in range(2, len(df) - 1):
             row = df.iloc[i]
             nxt = df.iloc[i + 1]
             ts = row["open_dt"]
             if (current_day is None) or (ts.date() != current_day):
                 current_day = ts.date()
-                day_anchor = self._mark_equity(self.position, self.qty, self.entry_px, row["close"])
+                day_anchor = self._mark_equity(row["close"])
                 day_stop = False
 
             buy_px = nxt["open"] * (1 + slippage)
             sell_px = nxt["open"] * (1 - slippage)
 
-            if self.position and self.tp1_done:
+            if state.is_active and state.tp1_done:
                 current_atr = row["atr"]
                 if np.isfinite(current_atr):
                     trail = row["close"] - self.s.trail_mult * current_atr
-                    self.stop = max(self.stop, trail)
-                    breakeven = self.entry_px + self.entry_px * fee_rate * 2.0 + 0.3 * current_atr
-                    self.stop = max(self.stop, breakeven)
+                    state.stop = max(state.stop, trail)
+                    breakeven = state.entry_px + state.entry_px * fee_rate * 2.0 + 0.3 * current_atr
+                    state.stop = max(state.stop, breakeven)
 
-            if self.position:
+            if state.is_active:
                 low = row["low"]
                 high = row["high"]
-                if low <= self.stop:
-                    exit_px = max(self.stop * (1 - slippage), 1e-9)
-                    self._record_trade(ts, exit_px, self.qty, "stop", self.entry_fee_remain)
+                if low <= state.stop:
+                    exit_px = max(state.stop * (1 - slippage), 1e-9)
+                    self._record_trade(ts, exit_px, state.qty, "stop", state.entry_fee_remain)
                     self._reset_state()
                 else:
-                    if (not self.tp1_done) and high >= self.tp1 and self.qty > 0:
-                        quantity = self.qty * self.s.tp1_pct
-                        fill = self.tp1 * (1 - slippage)
-                        alloc = self.entry_fee_total * (quantity / max(1e-12, self.qty))
+                    if (not state.tp1_done) and high >= state.tp1 and state.qty > 0:
+                        current_qty = state.qty
+                        quantity = current_qty * self.s.tp1_pct
+                        fill = state.tp1 * (1 - slippage)
+                        alloc = state.entry_fee_total * (quantity / max(1e-12, current_qty))
                         self._record_trade(ts, fill, quantity, "tp1", alloc)
-                        self.qty -= quantity
-                        self.tp1_done = True
-                    if self.position and high >= self.tp2 and self.qty > 0:
-                        fill = self.tp2 * (1 - slippage)
-                        self._record_trade(ts, fill, self.qty, "tp2", self.entry_fee_remain)
+                        state.qty = max(0.0, current_qty - quantity)
+                        state.tp1_done = True
+                    if state.is_active and high >= state.tp2 and state.qty > 0:
+                        fill = state.tp2 * (1 - slippage)
+                        self._record_trade(ts, fill, state.qty, "tp2", state.entry_fee_remain)
                         self._reset_state()
-                    if self.position:
-                        self.bars_in_trade += 1
-                        if self.s.max_bars_in_trade and self.bars_in_trade >= self.s.max_bars_in_trade:
-                            self._record_trade(nxt["open_dt"], sell_px, self.qty, "timeout", self.entry_fee_remain)
+                    if state.is_active:
+                        state.bars_in_trade += 1
+                        if self.s.max_bars_in_trade and state.bars_in_trade >= self.s.max_bars_in_trade:
+                            self._record_trade(nxt["open_dt"], sell_px, state.qty, "timeout", state.entry_fee_remain)
                             self._reset_state()
 
-            equity_now = self._mark_equity(self.position, self.qty, self.entry_px, row["close"])
+            equity_now = self._mark_equity(row["close"])
             peak = max(peak, equity_now)
             if day_anchor and equity_now <= day_anchor * (1 - self.s.day_stop_pct):
                 day_stop = True
 
-            if (not self.position) and (i > cooled_until) and (not day_stop) and row["long_signal"]:
+            if (not state.is_active) and (i > cooled_until) and (not day_stop) and row["long_signal"]:
                 atr_value = row["atr"]
                 if np.isfinite(atr_value) and atr_value > 0:
                     entry_px = buy_px
@@ -563,17 +611,17 @@ class Backtester:
                             else:
                                 self.cash -= entry_fee_total
 
-                            self.position = "long"
-                            self.qty = qty
-                            self.entry_px = entry_px
-                            self.entry_ts = nxt["open_dt"]
-                            self.stop = stop
-                            self.tp1 = tp1
-                            self.tp2 = tp2
-                            self.tp1_done = False
-                            self.bars_in_trade = 0
-                            self.entry_fee_total = entry_fee_total
-                            self.entry_fee_remain = entry_fee_total
+                            state.side = "long"
+                            state.qty = qty
+                            state.entry_px = entry_px
+                            state.entry_ts = nxt["open_dt"]
+                            state.stop = stop
+                            state.tp1 = tp1
+                            state.tp2 = tp2
+                            state.tp1_done = False
+                            state.bars_in_trade = 0
+                            state.entry_fee_total = entry_fee_total
+                            state.entry_fee_remain = entry_fee_total
 
                             base_cool = self.s.cooldown_bars
                             add_cool = (
@@ -587,17 +635,17 @@ class Backtester:
 
             equity_records.append({"time": row["close_dt"], "equity": equity_now})
 
-        if self.position and self.qty > 0:
+        if state.is_active:
             last_price = self.df["close"].iloc[-1] * (1 - slippage)
             last_ts = self.df["open_dt"].iloc[-1]
-            self._record_trade(last_ts, last_price, self.qty, "eod_close", self.entry_fee_remain)
+            self._record_trade(last_ts, last_price, state.qty, "eod_close", state.entry_fee_remain)
             self._reset_state()
 
         equity_df = pd.DataFrame(equity_records).set_index("time") if equity_records else pd.DataFrame()
         metrics = self._metrics(equity_df["equity"], self.trades) if not equity_df.empty else {}
         pnl_sum = float(sum(trade.pnl for trade in self.trades))
         if not equity_df.empty and abs(equity_df["equity"].iloc[-1] - (self.b.init_cash + pnl_sum)) > 1e-2:
-            print("⚠️ 自洽校验存在微小偏差")
+            LOGGER.warning("权益校验存在微小偏差")
 
         return BacktestResult(equity_df, self.trades, metrics)
 
@@ -696,34 +744,38 @@ def plot_results(eq: pd.DataFrame, trades: List[Trade], symbol: str, interval: s
 
 
 def print_report(metrics: Dict[str, Any], trades: List[Trade]) -> None:
-    """在终端打印回测摘要。"""
+    """输出回测摘要。"""
 
     if not metrics:
-        print("❌ 无结果")
+        LOGGER.error("无回测结果")
         return
-    print("=" * 66, "\n📊 回测报告")
-    print(
+
+    lines = ["=" * 66, "📊 回测报告"]
+    lines.append(
         f"期间: {metrics['start']}→{metrics['end']}  天数:{metrics['days']}  K线:{metrics['bars']}"
     )
-    print(
+    lines.append(
         f"资金: 初始${metrics['initial_cash']:.2f}  期末${metrics['final_equity']:.2f}  "
         f"总收益{metrics['total_return'] * 100:+.2f}%  年化{metrics['cagr'] * 100:+.2f}%  夏普{metrics['sharpe']:.3f}"
     )
-    print(f"风险: 最大回撤 {metrics['max_drawdown'] * 100:.2f}%")
-    print(
+    lines.append(f"风险: 最大回撤 {metrics['max_drawdown'] * 100:.2f}%")
+    lines.append(
         f"成交: 段落{metrics['trades']}  胜{metrics['wins']}  负{metrics['losses']}  "
         f"胜率{metrics['win_rate'] * 100:.2f}%  盈亏比{metrics['payoff']:.3f}  PF{metrics['profit_factor']:.3f}"
     )
     if trades:
-        print("\n最近10条：")
-        print(f"{'入场时间':<20}{'方向':<6}{'入':>9}{'出':>9}{'数量':>11}{'盈亏':>13}{'原因':>8}")
+        lines.append("\n最近10条：")
+        lines.append(
+            f"{'入场时间':<20}{'方向':<6}{'入':>9}{'出':>9}{'数量':>11}{'盈亏':>13}{'原因':>8}"
+        )
         for trade in trades[-10:]:
             entry_time = trade.entry_time.strftime("%Y-%m-%d %H:%M") if trade.entry_time else "N/A"
-            print(
+            lines.append(
                 f"{entry_time:<20}{trade.side:<6}{trade.entry_price:>9.2f}{trade.exit_price:>9.2f}"
                 f"{trade.qty:>11.6f}{trade.pnl:>13.2f}{trade.reason:>8}"
             )
-    print("=" * 66)
+    lines.append("=" * 66)
+    LOGGER.info("\n".join(lines))
 
 
 def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
@@ -747,7 +799,7 @@ def _load_data(args: argparse.Namespace) -> Optional[pd.DataFrame]:
         try:
             df = load_klines_from_file(args.input_file)
         except (FileNotFoundError, ValueError) as exc:
-            print(f"❌ 无法加载本地数据: {exc}")
+            LOGGER.error("无法加载本地数据: %s", exc)
             return None
 
         if start is not None:
@@ -755,7 +807,7 @@ def _load_data(args: argparse.Namespace) -> Optional[pd.DataFrame]:
         if end is not None:
             df = df[df["open_dt"] <= end]
         if df.empty:
-            print("❌ 本地数据在指定时间范围内为空")
+            LOGGER.error("本地数据在指定时间范围内为空")
             return None
         return df
 
@@ -767,7 +819,7 @@ def _load_data(args: argparse.Namespace) -> Optional[pd.DataFrame]:
     limit = getattr(args, "limit", 1000)
     df = fetch_klines(args.symbol, args.interval, start, end, limit=limit)
     if df.empty:
-        print("❌ 无K线")
+        LOGGER.error("未获取到任何K线数据")
         return None
     return df
 
@@ -880,7 +932,7 @@ def run_optimize(args: argparse.Namespace) -> None:
         rsi_values = _parse_range_spec(getattr(args, "rsi_range", None), float)
         adx_values = _parse_range_spec(getattr(args, "adx_range", None), float)
     except ValueError as exc:
-        print(f"❌ 范围参数解析失败: {exc}")
+        LOGGER.error("范围参数解析失败: %s", exc)
         return
 
     if not fast_values:
@@ -899,10 +951,10 @@ def run_optimize(args: argparse.Namespace) -> None:
         combos.append((fast, slow, rsi, adx))
 
     if not combos:
-        print("❌ 未生成有效的参数组合，请检查范围设置")
+        LOGGER.error("未生成有效的参数组合，请检查范围设置")
         return
 
-    print(f"🚀 启动优化，共 {len(combos)} 组组合")
+    LOGGER.info("启动优化，共 %d 组组合", len(combos))
     records: List[Dict[str, Any]] = []
     for idx, (fast, slow, rsi, adx) in enumerate(combos, start=1):
         strategy = dataclasses.replace(
@@ -928,13 +980,20 @@ def run_optimize(args: argparse.Namespace) -> None:
         if args.verbose:
             ret_pct = metrics.get("total_return", float("nan")) * 100
             sharpe = metrics.get("sharpe", float("nan"))
-            print(
-                f"[{idx:>4}/{len(combos)}] fast={fast} slow={slow} rsi={rsi:.2f} adx={adx:.2f}"
-                f" -> 收益{ret_pct:+.2f}% 夏普{sharpe:.3f}"
+            LOGGER.info(
+                "[%4d/%d] fast=%s slow=%s rsi=%.2f adx=%.2f -> 收益%+.2f%% 夏普%.3f",
+                idx,
+                len(combos),
+                fast,
+                slow,
+                rsi,
+                adx,
+                ret_pct,
+                sharpe,
             )
 
     if not records:
-        print("❌ 无有效回测结果")
+        LOGGER.error("无有效回测结果")
         return
 
     sort_by = args.sort_by
@@ -948,21 +1007,22 @@ def run_optimize(args: argparse.Namespace) -> None:
     records.sort(key=sort_value, reverse=True)
 
     top_n = min(args.top, len(records))
-    print(f"🏁 完成优化，展示前 {top_n} 组（按 {sort_by} 降序）")
+    LOGGER.info("完成优化，展示前 %d 组（按 %s 降序）", top_n, sort_by)
     header = (
         f"{'排名':<4}{'fast':>6}{'slow':>6}{'RSI':>8}{'ADX':>8}"
         f"{'收益%':>10}{'夏普':>9}{'回撤%':>10}{'笔数':>8}"
     )
-    print(header)
+    table_lines = [header]
     for rank, row in enumerate(records[:top_n], start=1):
         total_return = row.get("total_return", float("nan")) * 100
         max_dd = row.get("max_drawdown", float("nan")) * 100
         sharpe = row.get("sharpe", float("nan"))
         trades = row.get("trades", 0)
-        print(
+        table_lines.append(
             f"{rank:<4}{row['fast']:>6}{row['slow']:>6}{row['rsi_long_min']:>8.2f}{row['adx_min']:>8.2f}"
             f"{total_return:>10.2f}{sharpe:>9.3f}{max_dd:>10.2f}{trades:>8}"
         )
+    LOGGER.info("\n".join(table_lines))
 
     if args.output:
         ensure_outputs()
@@ -972,13 +1032,19 @@ def run_optimize(args: argparse.Namespace) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         df_out = pd.DataFrame(records)
         df_out.to_csv(output_path, index=False)
-        print(f"💾 已保存 {len(records)} 条结果至 {output_path}")
+        LOGGER.info("已保存 %d 条结果至 %s", len(records), output_path)
 
 
 def build_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器。"""
 
     parser = argparse.ArgumentParser("BTC量化回测(精简验证版)")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="设置日志等级（默认 INFO）",
+    )
     sub = parser.add_subparsers(dest="cmd")
     strategy_defaults = StrategyConfig()
     broker_defaults = BrokerConfig()
@@ -990,22 +1056,22 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--end")
     backtest.add_argument("--input_file", help="使用已下载的本地 K 线文件")
     backtest.add_argument("--limit", type=int, default=1000, help="单次 API 拉取的最大 K 线数量")
-    backtest.add_argument("--fast", type=int, default=30)
-    backtest.add_argument("--slow", type=int, default=90)
-    backtest.add_argument("--rsi_long_min", type=float, default=55.0)
-    backtest.add_argument("--adx_min", type=float, default=18.0)
-    backtest.add_argument("--cross_buffer_atr", type=float, default=0.28)
-    backtest.add_argument("--atr_sl_mult", type=float, default=2.5)
-    backtest.add_argument("--atr_tp1_mult", type=float, default=2.0)
-    backtest.add_argument("--atr_tp2_mult", type=float, default=6.0)
-    backtest.add_argument("--tp1_pct", type=float, default=0.25)
-    backtest.add_argument("--trail_mult", type=float, default=3.0)
-    backtest.add_argument("--risk_per_trade", type=float, default=0.005)
-    backtest.add_argument("--max_bars_in_trade", type=int, default=240)
-    backtest.add_argument("--day_stop_pct", type=float, default=0.015)
-    backtest.add_argument("--init_cash", type=float, default=10_000.0)
-    backtest.add_argument("--fee_rate", type=float, default=0.001)
-    backtest.add_argument("--slippage_bp", type=float, default=1.0)
+    backtest.add_argument("--fast", type=int, default=strategy_defaults.fast)
+    backtest.add_argument("--slow", type=int, default=strategy_defaults.slow)
+    backtest.add_argument("--rsi_long_min", type=float, default=strategy_defaults.rsi_long_min)
+    backtest.add_argument("--adx_min", type=float, default=strategy_defaults.adx_min)
+    backtest.add_argument("--cross_buffer_atr", type=float, default=strategy_defaults.cross_buffer_atr)
+    backtest.add_argument("--atr_sl_mult", type=float, default=strategy_defaults.atr_sl_mult)
+    backtest.add_argument("--atr_tp1_mult", type=float, default=strategy_defaults.atr_tp1_mult)
+    backtest.add_argument("--atr_tp2_mult", type=float, default=strategy_defaults.atr_tp2_mult)
+    backtest.add_argument("--tp1_pct", type=float, default=strategy_defaults.tp1_pct)
+    backtest.add_argument("--trail_mult", type=float, default=strategy_defaults.trail_mult)
+    backtest.add_argument("--risk_per_trade", type=float, default=strategy_defaults.risk_per_trade)
+    backtest.add_argument("--max_bars_in_trade", type=int, default=strategy_defaults.max_bars_in_trade)
+    backtest.add_argument("--day_stop_pct", type=float, default=strategy_defaults.day_stop_pct)
+    backtest.add_argument("--init_cash", type=float, default=broker_defaults.init_cash)
+    backtest.add_argument("--fee_rate", type=float, default=broker_defaults.fee_rate)
+    backtest.add_argument("--slippage_bp", type=float, default=broker_defaults.slippage_bp)
     backtest.add_argument("--accounting", choices=["spot", "futures"], default="spot")
 
     fetch = sub.add_parser("fetch", help="下载 K 线数据并保存")
@@ -1065,7 +1131,7 @@ def run_fetch(args: argparse.Namespace) -> None:
 
     df = fetch_klines(args.symbol, args.interval, start, end, limit=args.limit)
     if df.empty:
-        print("❌ 未获取到任何数据")
+        LOGGER.error("未获取到任何数据")
         return
 
     output_path = Path(args.output)
@@ -1081,10 +1147,10 @@ def run_fetch(args: argparse.Namespace) -> None:
     elif suffix == ".parquet":
         df.to_parquet(output_path, index=False)
     else:
-        print("❌ 输出格式仅支持 CSV/JSON/Parquet")
+        LOGGER.error("输出格式仅支持 CSV/JSON/Parquet")
         return
 
-    print(f"✅ 已保存 {len(df)} 条K线至 {output_path}")
+    LOGGER.info("已保存 %d 条K线至 %s", len(df), output_path)
 
 
 def main() -> None:
@@ -1093,6 +1159,7 @@ def main() -> None:
     ensure_outputs()
     parser = build_parser()
     args = parser.parse_args()
+    configure_logging(getattr(args, "log_level", "INFO"))
     if args.cmd == "backtest":
         run_backtest(args)
     elif args.cmd == "fetch":

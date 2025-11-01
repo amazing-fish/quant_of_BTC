@@ -28,11 +28,21 @@ python quant.py backtest --symbol BTCUSDT --interval 1h --lookback_days 365
 
 运行后将在 `outputs/` 目录生成权益曲线、成交明细以及图形化回测报告。
 
-## 版本 1.0 优化摘要
+## 日志输出
 
-- 默认趋势判断窗口调整为 `fast=30`、`slow=90`，提升对中期趋势的响应稳定性。
-- RSI 与 ADX 筛选阈值下调至 `55` 与 `18`，在震荡期减少误触发同时不过度收紧信号。
-- ATR 止损/止盈与仓位权重优化为 `atr_sl_mult=2.5`、`atr_tp1_mult=2.0`、`atr_tp2_mult=6.0`、`tp1_pct=0.25`、`risk_per_trade=0.005`，以改善盈亏比与回撤控制。
+- 默认输出等级为 `INFO`，可通过 `--log-level` 控制详细程度，例如：
+
+  ```bash
+  python quant.py --log-level DEBUG backtest --interval 1h --input_file btcusdt_1h.csv
+  ```
+
+- 日志包含回测摘要、优化进度以及文件保存信息，便于快速审计流程。
+
+## 版本 1.2 更新摘要
+
+- 回测状态改用数据类封装，减少重复赋值，提升可维护性。
+- 日志改为标准 `logging` 管理，支持等级切换与结构化输出。
+- 结合网格搜索，将默认参数调整为 `fast=24`、`slow=100`、`rsi_long_min=63`、`adx_min=20`，强调稳健的顺势过滤。
 
 使用仓库附带的 `btcusdt_1h.csv` 数据执行：
 
@@ -40,7 +50,7 @@ python quant.py backtest --symbol BTCUSDT --interval 1h --lookback_days 365
 python quant.py backtest --interval 1h --input_file btcusdt_1h.csv
 ```
 
-可得到约 **+0.77%** 的总收益、**-1.30%** 的最大回撤与 **1.45** 左右的利润因子，相较旧默认参数（总收益约 **-2.45%**）显著改善基准表现。
+可得到约 **+1.52%** 的总收益、**-0.64%** 的最大回撤与 **0.998** 的夏普值，利润因子约 **3.61**，较旧版本显著改善收益与风险匹配度。
 
 若所在网络无法直接访问 Binance，可先使用 `fetch` 子命令或外部工具下载 K 线数据，再通过 `--input_file` 选项离线回测：
 
@@ -66,26 +76,25 @@ python quant.py backtest --interval 1h --input_file outputs/btcusdt_1h.csv
 
 ## 参数优化
 
-`optimize` 子命令可在同一份数据上执行网格搜索，组合不同的快慢均线、RSI 与 ADX 阈值。范围参数支持 `start:end:step` 或逗号分隔列表，例如 `--fast-range 20:40:10 --rsi-range 55,60,65`。完整示例：
+`optimize` 子命令可在同一份数据上执行网格搜索，组合不同的快慢均线、RSI 与 ADX 阈值。范围参数支持 `start:end:step` 或逗号分隔列表，例如 `--fast-range 22:28:2 --rsi-range 63,65,67`。完整示例：
 
 ```bash
 python quant.py optimize \
   --interval 1h --input_file btcusdt_1h.csv \
-  --fast-range 20:40:10 --slow-range 80:140:20 \
-  --rsi-range 50:65:5 --adx-range 15:25:5 \
+  --fast-range 22:28:2 --slow-range 95:110:5 \
+  --rsi-range 63,65,67 --adx-range 20:24:2 \
   --sort-by sharpe --top 5 --output outputs/optimization.csv
 ```
 
-上述设置共评估 144 组组合，按夏普排序的前五名如下：
+上述设置共评估 81 组组合，按夏普排序的前五名如下：
 
-```
-排名    fast  slow     RSI     ADX       收益%       夏普       回撤%      笔数
-1       40    80   60.00   15.00      1.17    0.579     -1.75      16
-2       40    80   60.00   20.00      1.04    0.534     -1.87      14
-3       30    80   60.00   20.00      0.77    0.512     -1.04      12
-4       30    80   60.00   25.00      0.77    0.512     -1.04      12
-5       20    80   60.00   20.00      0.99    0.418     -1.50      21
-```
+| 排名 | fast | slow | RSI  | ADX  | 收益% | 夏普 | 回撤% | 笔数 |
+|------|-----:|-----:|-----:|-----:|------:|-----:|------:|-----:|
+| 1    |   24 |  100 | 63.0 | 20.0 |  1.52 | 0.998 | -0.64 |   13 |
+| 2    |   24 |  105 | 63.0 | 24.0 |  1.39 | 0.924 | -0.64 |   11 |
+| 3    |   24 |  105 | 63.0 | 22.0 |  1.39 | 0.924 | -0.64 |   11 |
+| 4    |   24 |  100 | 63.0 | 24.0 |  1.39 | 0.924 | -0.64 |   11 |
+| 5    |   24 |  100 | 63.0 | 22.0 |  1.39 | 0.924 | -0.64 |   11 |
 
 完整记录会写入 `outputs/optimization.csv`，若搜索空间更大（如包含更多指标），运行耗时会急剧增长，建议逐步扩大范围并留意组合数量。
 
