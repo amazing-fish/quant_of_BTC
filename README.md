@@ -12,15 +12,9 @@
 ## 环境要求
 
 - Python 3.9+
-- 依赖库：`requests`、`numpy`、`pandas`、`matplotlib`（可选）
+- 依赖库：`requests`、`numpy`、`pandas`、`matplotlib`
 
-可通过以下命令安装依赖：
-
-```bash
-pip install -r requirements.txt
-```
-
-如仓库内暂未提供 `requirements.txt`，可直接安装：
+通过以下命令安装依赖：
 
 ```bash
 pip install requests numpy pandas matplotlib
@@ -29,13 +23,10 @@ pip install requests numpy pandas matplotlib
 ## 快速开始
 
 ```bash
-python quant.py backtest \
-  --symbol BTCUSDT \
-  --interval 1h \
-  --lookback_days 365
+python quant.py backtest --symbol BTCUSDT --interval 1h --lookback_days 365
 ```
 
-运行后将在 `outputs/` 目录生成权益曲线、成交明细以及（若已安装 matplotlib）图形化回测报告。
+运行后将在 `outputs/` 目录生成权益曲线、成交明细以及图形化回测报告。
 
 ## 版本 1.0 优化摘要
 
@@ -54,17 +45,11 @@ python quant.py backtest --interval 1h --input_file btcusdt_1h.csv
 若所在网络无法直接访问 Binance，可先使用 `fetch` 子命令或外部工具下载 K 线数据，再通过 `--input_file` 选项离线回测：
 
 ```bash
-# 1.（可选）尝试直接拉取并保存 CSV
-python quant.py fetch \
-  --symbol BTCUSDT \
-  --interval 1h \
-  --lookback_days 365 \
-  --output outputs/btcusdt_1h.csv
+# 1.尝试直接拉取并保存 CSV
+python quant.py fetch --symbol BTCUSDT --interval 1h --lookback_days 365 --output outputs/btcusdt_1h.csv
 
 # 2. 使用本地文件进行回测
-python quant.py backtest \
-  --interval 1h \
-  --input_file outputs/btcusdt_1h.csv
+python quant.py backtest --interval 1h --input_file outputs/btcusdt_1h.csv
 ```
 
 ## 常用参数
@@ -79,10 +64,6 @@ python quant.py backtest \
 
 使用 `-h` 查看全部参数说明：
 
-```bash
-python quant.py backtest -h
-```
-
 ## 目录结构
 
 ```
@@ -93,6 +74,6 @@ outputs/      # 运行后生成的结果文件（首次执行自动创建）
 ## 注意事项
 
 - Binance 公共接口存在频率限制，脚本内部已添加轻量节流，仍建议适当控制拉取范围。
-- 若因地区限制导致 `fetch` 命令报错，可使用代理或在其他环境下载后通过 `--input_file` 导入。
+- 若 `fetch` 命令报错，可在其他环境下载后通过 `--input_file` 导入。
 - 回测结果仅供研究参考，不构成投资建议。
 - 修改策略逻辑或增加依赖时，请同步更新本文档与 `AGENTS.md`。
