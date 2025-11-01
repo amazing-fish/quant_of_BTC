@@ -37,6 +37,20 @@ python quant.py backtest \
 
 运行后将在 `outputs/` 目录生成权益曲线、成交明细以及（若已安装 matplotlib）图形化回测报告。
 
+## 版本 1.0 优化摘要
+
+- 默认趋势判断窗口调整为 `fast=30`、`slow=90`，提升对中期趋势的响应稳定性。
+- RSI 与 ADX 筛选阈值下调至 `55` 与 `18`，在震荡期减少误触发同时不过度收紧信号。
+- ATR 止损/止盈与仓位权重优化为 `atr_sl_mult=2.5`、`atr_tp1_mult=2.0`、`atr_tp2_mult=6.0`、`tp1_pct=0.25`、`risk_per_trade=0.005`，以改善盈亏比与回撤控制。
+
+使用仓库附带的 `btcusdt_1h.csv` 数据执行：
+
+```bash
+python quant.py backtest --interval 1h --input_file btcusdt_1h.csv
+```
+
+可得到约 **+0.77%** 的总收益、**-1.30%** 的最大回撤与 **1.45** 左右的利润因子，相较旧默认参数（总收益约 **-2.45%**）显著改善基准表现。
+
 若所在网络无法直接访问 Binance，可先使用 `fetch` 子命令或外部工具下载 K 线数据，再通过 `--input_file` 选项离线回测：
 
 ```bash

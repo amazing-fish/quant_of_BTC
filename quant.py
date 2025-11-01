@@ -272,17 +272,17 @@ def adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
 class StrategyConfig:
     """策略参数。"""
 
-    fast: int = 20
-    slow: int = 60
-    rsi_long_min: float = 58.0
-    adx_min: float = 22.0
+    fast: int = 30
+    slow: int = 90
+    rsi_long_min: float = 55.0
+    adx_min: float = 18.0
     cross_buffer_atr: float = 0.28
-    atr_sl_mult: float = 3.2
-    atr_tp1_mult: float = 2.2
-    atr_tp2_mult: float = 5.0
-    tp1_pct: float = 0.40
-    trail_mult: float = 3.5
-    risk_per_trade: float = 0.0045
+    atr_sl_mult: float = 2.5
+    atr_tp1_mult: float = 2.0
+    atr_tp2_mult: float = 6.0
+    tp1_pct: float = 0.25
+    trail_mult: float = 3.0
+    risk_per_trade: float = 0.005
     max_bars_in_trade: int = 240
     day_stop_pct: float = 0.015
     rsi_period: int = 14
@@ -803,17 +803,17 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--end")
     backtest.add_argument("--input_file", help="使用已下载的本地 K 线文件")
     backtest.add_argument("--limit", type=int, default=1000, help="单次 API 拉取的最大 K 线数量")
-    backtest.add_argument("--fast", type=int, default=20)
-    backtest.add_argument("--slow", type=int, default=60)
-    backtest.add_argument("--rsi_long_min", type=float, default=58.0)
-    backtest.add_argument("--adx_min", type=float, default=22.0)
+    backtest.add_argument("--fast", type=int, default=30)
+    backtest.add_argument("--slow", type=int, default=90)
+    backtest.add_argument("--rsi_long_min", type=float, default=55.0)
+    backtest.add_argument("--adx_min", type=float, default=18.0)
     backtest.add_argument("--cross_buffer_atr", type=float, default=0.28)
-    backtest.add_argument("--atr_sl_mult", type=float, default=3.2)
-    backtest.add_argument("--atr_tp1_mult", type=float, default=2.2)
-    backtest.add_argument("--atr_tp2_mult", type=float, default=5.0)
-    backtest.add_argument("--tp1_pct", type=float, default=0.40)
-    backtest.add_argument("--trail_mult", type=float, default=3.5)
-    backtest.add_argument("--risk_per_trade", type=float, default=0.0045)
+    backtest.add_argument("--atr_sl_mult", type=float, default=2.5)
+    backtest.add_argument("--atr_tp1_mult", type=float, default=2.0)
+    backtest.add_argument("--atr_tp2_mult", type=float, default=6.0)
+    backtest.add_argument("--tp1_pct", type=float, default=0.25)
+    backtest.add_argument("--trail_mult", type=float, default=3.0)
+    backtest.add_argument("--risk_per_trade", type=float, default=0.005)
     backtest.add_argument("--max_bars_in_trade", type=int, default=240)
     backtest.add_argument("--day_stop_pct", type=float, default=0.015)
     backtest.add_argument("--init_cash", type=float, default=10_000.0)
