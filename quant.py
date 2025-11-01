@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import itertools
+import logging
 import math
 import os
 import time
@@ -56,6 +57,27 @@ INTERVALS_MINUTES: Dict[str, int] = {
 }
 
 SESSION = requests.Session()
+LOGGER = logging.getLogger("quant")
+
+
+def configure_logging(level: str = "INFO") -> None:
+    """根据命令行参数初始化日志系统。"""
+
+    normalized = level.upper()
+    valid = {
+        "CRITICAL": logging.CRITICAL,
+        "ERROR": logging.ERROR,
+        "WARNING": logging.WARNING,
+        "INFO": logging.INFO,
+        "DEBUG": logging.DEBUG,
+    }
+    logging.basicConfig(
+        level=valid.get(normalized, logging.INFO),
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    if normalized not in valid:
+        LOGGER.warning("未识别的日志级别 %s，已回退至 INFO", level)
 
 
 def ensure_outputs() -> None:
@@ -149,7 +171,7 @@ def fetch_klines(
                 start_ms = next_open
                 time.sleep(0.2)
     except Exception as exc:  # pragma: no cover - 网络异常时触发
-        print("❌ 数据获取失败:", exc)
+        LOGGER.error("数据获取失败: %s", exc)
         return pd.DataFrame()
 
     if not frames:
@@ -161,7 +183,7 @@ def fetch_klines(
         .sort_values("open_time")
         .reset_index(drop=True)
     )
-    print(f"✅ 获取K线: {len(result)}")
+    LOGGER.info("获取K线成功: %s 条", len(result))
     return result
 
 
@@ -273,9 +295,9 @@ def adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
 class StrategyConfig:
     """策略参数。"""
 
-    fast: int = 30
-    slow: int = 90
-    rsi_long_min: float = 55.0
+    fast: int = 34
+    slow: int = 100
+    rsi_long_min: float = 58.0
     adx_min: float = 18.0
     cross_buffer_atr: float = 0.28
     atr_sl_mult: float = 2.5
@@ -597,7 +619,7 @@ class Backtester:
         metrics = self._metrics(equity_df["equity"], self.trades) if not equity_df.empty else {}
         pnl_sum = float(sum(trade.pnl for trade in self.trades))
         if not equity_df.empty and abs(equity_df["equity"].iloc[-1] - (self.b.init_cash + pnl_sum)) > 1e-2:
-            print("⚠️ 自洽校验存在微小偏差")
+            LOGGER.warning("自洽校验存在微小偏差")
 
         return BacktestResult(equity_df, self.trades, metrics)
 
@@ -687,43 +709,48 @@ def plot_results(eq: pd.DataFrame, trades: List[Trade], symbol: str, interval: s
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
         ax.tick_params(axis="x", rotation=45)
     plt.tight_layout()
+    plot_path = os.path.join("outputs", f"backtest_result_{symbol}_{interval}.png")
     plt.savefig(
-        os.path.join("outputs", f"backtest_result_{symbol}_{interval}.png"),
+        plot_path,
         dpi=150,
         bbox_inches="tight",
     )
     plt.close()
+    LOGGER.info("已生成回测图形报告 %s", plot_path)
 
 
 def print_report(metrics: Dict[str, Any], trades: List[Trade]) -> None:
     """在终端打印回测摘要。"""
 
     if not metrics:
-        print("❌ 无结果")
+        LOGGER.error("无回测结果，可能是数据不足或策略未触发交易")
         return
-    print("=" * 66, "\n📊 回测报告")
-    print(
+    lines = ["=" * 66, "📊 回测报告"]
+    lines.append(
         f"期间: {metrics['start']}→{metrics['end']}  天数:{metrics['days']}  K线:{metrics['bars']}"
     )
-    print(
+    lines.append(
         f"资金: 初始${metrics['initial_cash']:.2f}  期末${metrics['final_equity']:.2f}  "
         f"总收益{metrics['total_return'] * 100:+.2f}%  年化{metrics['cagr'] * 100:+.2f}%  夏普{metrics['sharpe']:.3f}"
     )
-    print(f"风险: 最大回撤 {metrics['max_drawdown'] * 100:.2f}%")
-    print(
+    lines.append(f"风险: 最大回撤 {metrics['max_drawdown'] * 100:.2f}%")
+    lines.append(
         f"成交: 段落{metrics['trades']}  胜{metrics['wins']}  负{metrics['losses']}  "
         f"胜率{metrics['win_rate'] * 100:.2f}%  盈亏比{metrics['payoff']:.3f}  PF{metrics['profit_factor']:.3f}"
     )
     if trades:
-        print("\n最近10条：")
-        print(f"{'入场时间':<20}{'方向':<6}{'入':>9}{'出':>9}{'数量':>11}{'盈亏':>13}{'原因':>8}")
+        lines.append("最近10条：")
+        lines.append(
+            f"{'入场时间':<20}{'方向':<6}{'入':>9}{'出':>9}{'数量':>11}{'盈亏':>13}{'原因':>8}"
+        )
         for trade in trades[-10:]:
             entry_time = trade.entry_time.strftime("%Y-%m-%d %H:%M") if trade.entry_time else "N/A"
-            print(
+            lines.append(
                 f"{entry_time:<20}{trade.side:<6}{trade.entry_price:>9.2f}{trade.exit_price:>9.2f}"
                 f"{trade.qty:>11.6f}{trade.pnl:>13.2f}{trade.reason:>8}"
             )
-    print("=" * 66)
+    lines.append("=" * 66)
+    LOGGER.info("\n".join(lines))
 
 
 def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
@@ -747,7 +774,7 @@ def _load_data(args: argparse.Namespace) -> Optional[pd.DataFrame]:
         try:
             df = load_klines_from_file(args.input_file)
         except (FileNotFoundError, ValueError) as exc:
-            print(f"❌ 无法加载本地数据: {exc}")
+            LOGGER.error("无法加载本地数据: %s", exc)
             return None
 
         if start is not None:
@@ -755,7 +782,7 @@ def _load_data(args: argparse.Namespace) -> Optional[pd.DataFrame]:
         if end is not None:
             df = df[df["open_dt"] <= end]
         if df.empty:
-            print("❌ 本地数据在指定时间范围内为空")
+            LOGGER.error("本地数据在指定时间范围内为空")
             return None
         return df
 
@@ -767,7 +794,7 @@ def _load_data(args: argparse.Namespace) -> Optional[pd.DataFrame]:
     limit = getattr(args, "limit", 1000)
     df = fetch_klines(args.symbol, args.interval, start, end, limit=limit)
     if df.empty:
-        print("❌ 无K线")
+        LOGGER.error("未获取到任何K线数据")
         return None
     return df
 
@@ -855,10 +882,14 @@ def run_backtest(args: argparse.Namespace) -> None:
     result = backtester.run()
 
     ensure_outputs()
-    result.equity_curve.to_csv("outputs/equity_curve.csv")
+    equity_path = Path("outputs/equity_curve.csv")
+    result.equity_curve.to_csv(equity_path)
+    LOGGER.info("已导出权益曲线至 %s", equity_path)
     trades_df = pd.DataFrame([dataclasses.asdict(trade) for trade in result.trades])
     if not trades_df.empty:
-        trades_df.to_csv("outputs/trades.csv", index=False)
+        trades_path = Path("outputs/trades.csv")
+        trades_df.to_csv(trades_path, index=False)
+        LOGGER.info("已导出成交明细至 %s", trades_path)
     if HAS_PLOT:
         plot_results(result.equity_curve, result.trades, args.symbol, args.interval)
     print_report(result.metrics, result.trades)
@@ -880,7 +911,7 @@ def run_optimize(args: argparse.Namespace) -> None:
         rsi_values = _parse_range_spec(getattr(args, "rsi_range", None), float)
         adx_values = _parse_range_spec(getattr(args, "adx_range", None), float)
     except ValueError as exc:
-        print(f"❌ 范围参数解析失败: {exc}")
+        LOGGER.error("范围参数解析失败: %s", exc)
         return
 
     if not fast_values:
@@ -899,10 +930,10 @@ def run_optimize(args: argparse.Namespace) -> None:
         combos.append((fast, slow, rsi, adx))
 
     if not combos:
-        print("❌ 未生成有效的参数组合，请检查范围设置")
+        LOGGER.error("未生成有效的参数组合，请检查范围设置")
         return
 
-    print(f"🚀 启动优化，共 {len(combos)} 组组合")
+    LOGGER.info("启动优化，共 %s 组组合", len(combos))
     records: List[Dict[str, Any]] = []
     for idx, (fast, slow, rsi, adx) in enumerate(combos, start=1):
         strategy = dataclasses.replace(
@@ -928,13 +959,20 @@ def run_optimize(args: argparse.Namespace) -> None:
         if args.verbose:
             ret_pct = metrics.get("total_return", float("nan")) * 100
             sharpe = metrics.get("sharpe", float("nan"))
-            print(
-                f"[{idx:>4}/{len(combos)}] fast={fast} slow={slow} rsi={rsi:.2f} adx={adx:.2f}"
-                f" -> 收益{ret_pct:+.2f}% 夏普{sharpe:.3f}"
+            LOGGER.info(
+                "[%4d/%d] fast=%s slow=%s rsi=%.2f adx=%.2f -> 收益%+.2f%% 夏普%.3f",
+                idx,
+                len(combos),
+                fast,
+                slow,
+                rsi,
+                adx,
+                ret_pct,
+                sharpe,
             )
 
     if not records:
-        print("❌ 无有效回测结果")
+        LOGGER.error("无有效回测结果")
         return
 
     sort_by = args.sort_by
@@ -948,21 +986,22 @@ def run_optimize(args: argparse.Namespace) -> None:
     records.sort(key=sort_value, reverse=True)
 
     top_n = min(args.top, len(records))
-    print(f"🏁 完成优化，展示前 {top_n} 组（按 {sort_by} 降序）")
+    LOGGER.info("完成优化，展示前 %s 组（按 %s 降序）", top_n, sort_by)
     header = (
         f"{'排名':<4}{'fast':>6}{'slow':>6}{'RSI':>8}{'ADX':>8}"
         f"{'收益%':>10}{'夏普':>9}{'回撤%':>10}{'笔数':>8}"
     )
-    print(header)
+    lines = [header]
     for rank, row in enumerate(records[:top_n], start=1):
         total_return = row.get("total_return", float("nan")) * 100
         max_dd = row.get("max_drawdown", float("nan")) * 100
         sharpe = row.get("sharpe", float("nan"))
         trades = row.get("trades", 0)
-        print(
+        lines.append(
             f"{rank:<4}{row['fast']:>6}{row['slow']:>6}{row['rsi_long_min']:>8.2f}{row['adx_min']:>8.2f}"
             f"{total_return:>10.2f}{sharpe:>9.3f}{max_dd:>10.2f}{trades:>8}"
         )
+    LOGGER.info("\n".join(lines))
 
     if args.output:
         ensure_outputs()
@@ -972,13 +1011,18 @@ def run_optimize(args: argparse.Namespace) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         df_out = pd.DataFrame(records)
         df_out.to_csv(output_path, index=False)
-        print(f"💾 已保存 {len(records)} 条结果至 {output_path}")
+        LOGGER.info("已保存 %s 条优化结果至 %s", len(records), output_path)
 
 
 def build_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器。"""
 
     parser = argparse.ArgumentParser("BTC量化回测(精简验证版)")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        help="日志级别，支持 CRITICAL/ERROR/WARNING/INFO/DEBUG",
+    )
     sub = parser.add_subparsers(dest="cmd")
     strategy_defaults = StrategyConfig()
     broker_defaults = BrokerConfig()
@@ -990,10 +1034,10 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--end")
     backtest.add_argument("--input_file", help="使用已下载的本地 K 线文件")
     backtest.add_argument("--limit", type=int, default=1000, help="单次 API 拉取的最大 K 线数量")
-    backtest.add_argument("--fast", type=int, default=30)
-    backtest.add_argument("--slow", type=int, default=90)
-    backtest.add_argument("--rsi_long_min", type=float, default=55.0)
-    backtest.add_argument("--adx_min", type=float, default=18.0)
+    backtest.add_argument("--fast", type=int, default=strategy_defaults.fast)
+    backtest.add_argument("--slow", type=int, default=strategy_defaults.slow)
+    backtest.add_argument("--rsi_long_min", type=float, default=strategy_defaults.rsi_long_min)
+    backtest.add_argument("--adx_min", type=float, default=strategy_defaults.adx_min)
     backtest.add_argument("--cross_buffer_atr", type=float, default=0.28)
     backtest.add_argument("--atr_sl_mult", type=float, default=2.5)
     backtest.add_argument("--atr_tp1_mult", type=float, default=2.0)
@@ -1065,7 +1109,7 @@ def run_fetch(args: argparse.Namespace) -> None:
 
     df = fetch_klines(args.symbol, args.interval, start, end, limit=args.limit)
     if df.empty:
-        print("❌ 未获取到任何数据")
+        LOGGER.error("未获取到任何数据")
         return
 
     output_path = Path(args.output)
@@ -1081,18 +1125,19 @@ def run_fetch(args: argparse.Namespace) -> None:
     elif suffix == ".parquet":
         df.to_parquet(output_path, index=False)
     else:
-        print("❌ 输出格式仅支持 CSV/JSON/Parquet")
+        LOGGER.error("输出格式仅支持 CSV/JSON/Parquet")
         return
 
-    print(f"✅ 已保存 {len(df)} 条K线至 {output_path}")
+    LOGGER.info("已保存 %s 条K线至 %s", len(df), output_path)
 
 
 def main() -> None:
     """脚本入口。"""
 
-    ensure_outputs()
     parser = build_parser()
     args = parser.parse_args()
+    configure_logging(getattr(args, "log_level", "INFO"))
+    ensure_outputs()
     if args.cmd == "backtest":
         run_backtest(args)
     elif args.cmd == "fetch":
