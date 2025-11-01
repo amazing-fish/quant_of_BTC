@@ -64,6 +64,31 @@ python quant.py backtest --interval 1h --input_file outputs/btcusdt_1h.csv
 
 使用 `-h` 查看全部参数说明：
 
+## 参数优化
+
+`optimize` 子命令可在同一份数据上执行网格搜索，组合不同的快慢均线、RSI 与 ADX 阈值。范围参数支持 `start:end:step` 或逗号分隔列表，例如 `--fast-range 20:40:10 --rsi-range 55,60,65`。完整示例：
+
+```bash
+python quant.py optimize \
+  --interval 1h --input_file btcusdt_1h.csv \
+  --fast-range 20:40:10 --slow-range 80:140:20 \
+  --rsi-range 50:65:5 --adx-range 15:25:5 \
+  --sort-by sharpe --top 5 --output outputs/optimization.csv
+```
+
+上述设置共评估 144 组组合，按夏普排序的前五名如下：
+
+```
+排名    fast  slow     RSI     ADX       收益%       夏普       回撤%      笔数
+1       40    80   60.00   15.00      1.17    0.579     -1.75      16
+2       40    80   60.00   20.00      1.04    0.534     -1.87      14
+3       30    80   60.00   20.00      0.77    0.512     -1.04      12
+4       30    80   60.00   25.00      0.77    0.512     -1.04      12
+5       20    80   60.00   20.00      0.99    0.418     -1.50      21
+```
+
+完整记录会写入 `outputs/optimization.csv`，若搜索空间更大（如包含更多指标），运行耗时会急剧增长，建议逐步扩大范围并留意组合数量。
+
 ## 目录结构
 
 ```

@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import itertools
 import math
 import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -725,18 +726,29 @@ def print_report(metrics: Dict[str, Any], trades: List[Trade]) -> None:
     print("=" * 66)
 
 
-def run_backtest(args: argparse.Namespace) -> None:
-    """根据命令行参数执行回测。"""
+def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
+    """解析命令行时间参数，统一转换为 UTC。"""
 
-    start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc) if args.start else None
-    end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc) if args.end else None
+    if not value:
+        return None
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
-    if args.input_file:
+
+def _load_data(args: argparse.Namespace) -> Optional[pd.DataFrame]:
+    """根据命令行参数加载或下载 K 线数据。"""
+
+    start = _parse_datetime(getattr(args, "start", None))
+    end = _parse_datetime(getattr(args, "end", None))
+
+    if getattr(args, "input_file", None):
         try:
             df = load_klines_from_file(args.input_file)
         except (FileNotFoundError, ValueError) as exc:
             print(f"❌ 无法加载本地数据: {exc}")
-            return
+            return None
 
         if start is not None:
             df = df[df["open_dt"] >= start]
@@ -744,38 +756,100 @@ def run_backtest(args: argparse.Namespace) -> None:
             df = df[df["open_dt"] <= end]
         if df.empty:
             print("❌ 本地数据在指定时间范围内为空")
-            return
-    else:
-        if args.lookback_days and not start:
-            start = now_utc() - timedelta(days=args.lookback_days)
-        if end is None:
-            end = now_utc()
-        df = fetch_klines(args.symbol, args.interval, start, end, limit=args.limit)
-        if df.empty:
-            print("❌ 无K线")
-            return
+            return None
+        return df
 
-    strategy = StrategyConfig(
-        fast=args.fast,
-        slow=args.slow,
-        rsi_long_min=args.rsi_long_min,
-        adx_min=args.adx_min,
-        cross_buffer_atr=args.cross_buffer_atr,
-        atr_sl_mult=args.atr_sl_mult,
-        atr_tp1_mult=args.atr_tp1_mult,
-        atr_tp2_mult=args.atr_tp2_mult,
-        tp1_pct=args.tp1_pct,
-        trail_mult=args.trail_mult,
-        risk_per_trade=args.risk_per_trade,
-        max_bars_in_trade=args.max_bars_in_trade,
-        day_stop_pct=args.day_stop_pct,
-    )
-    broker = BrokerConfig(
-        init_cash=args.init_cash,
-        fee_rate=args.fee_rate,
-        slippage_bp=args.slippage_bp,
-        accounting=args.accounting,
-    )
+    lookback_days = getattr(args, "lookback_days", None)
+    if lookback_days and not start:
+        start = now_utc() - timedelta(days=lookback_days)
+    if end is None:
+        end = now_utc()
+    limit = getattr(args, "limit", 1000)
+    df = fetch_klines(args.symbol, args.interval, start, end, limit=limit)
+    if df.empty:
+        print("❌ 无K线")
+        return None
+    return df
+
+
+def _build_strategy_from_args(args: argparse.Namespace) -> StrategyConfig:
+    """根据命令行参数构建策略配置。"""
+
+    defaults = StrategyConfig()
+    overrides: Dict[str, Any] = {}
+    for field in dataclasses.fields(StrategyConfig):
+        if hasattr(args, field.name):
+            overrides[field.name] = getattr(args, field.name)
+    return dataclasses.replace(defaults, **overrides)
+
+
+def _build_broker_from_args(args: argparse.Namespace) -> BrokerConfig:
+    """根据命令行参数构建资金配置。"""
+
+    defaults = BrokerConfig()
+    overrides: Dict[str, Any] = {}
+    for field in dataclasses.fields(BrokerConfig):
+        if hasattr(args, field.name):
+            overrides[field.name] = getattr(args, field.name)
+    return dataclasses.replace(defaults, **overrides)
+
+
+def _parse_range_spec(spec: Optional[str], caster) -> List[Any]:
+    """解析 ``start:end:step`` 或逗号分隔的范围描述。"""
+
+    if not spec:
+        return []
+    text = spec.strip()
+    if not text:
+        return []
+
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) != 3:
+            raise ValueError("范围格式需形如 start:end:step")
+        start_raw, end_raw, step_raw = parts
+        if caster is int:
+            start = int(start_raw)
+            end = int(end_raw)
+            step = int(step_raw)
+            if step <= 0:
+                raise ValueError("步长必须为正数")
+            if start > end:
+                raise ValueError("起始值需不大于结束值")
+            values: List[int] = []
+            current = start
+            while current <= end:
+                values.append(current)
+                current += step
+            return values
+        start = float(start_raw)
+        end = float(end_raw)
+        step = float(step_raw)
+        if step <= 0:
+            raise ValueError("步长必须为正数")
+        if start > end:
+            raise ValueError("起始值需不大于结束值")
+        values_float: List[float] = []
+        current = start
+        while current <= end + 1e-9:
+            values_float.append(round(current, 10))
+            current += step
+        return [caster(str(value)) for value in values_float]
+
+    if "," in text:
+        return [caster(part.strip()) for part in text.split(",") if part.strip()]
+    return [caster(text)]
+
+
+def run_backtest(args: argparse.Namespace) -> None:
+    """根据命令行参数执行回测。"""
+
+    df = _load_data(args)
+    if df is None:
+        return
+
+    strategy = _build_strategy_from_args(args)
+    broker = _build_broker_from_args(args)
 
     backtester = Backtester(df, strategy, broker, args.interval)
     result = backtester.run()
@@ -790,11 +864,124 @@ def run_backtest(args: argparse.Namespace) -> None:
     print_report(result.metrics, result.trades)
 
 
+def run_optimize(args: argparse.Namespace) -> None:
+    """执行参数网格搜索优化。"""
+
+    df = _load_data(args)
+    if df is None:
+        return
+
+    base_strategy = _build_strategy_from_args(args)
+    broker = _build_broker_from_args(args)
+
+    try:
+        fast_values = _parse_range_spec(getattr(args, "fast_range", None), int)
+        slow_values = _parse_range_spec(getattr(args, "slow_range", None), int)
+        rsi_values = _parse_range_spec(getattr(args, "rsi_range", None), float)
+        adx_values = _parse_range_spec(getattr(args, "adx_range", None), float)
+    except ValueError as exc:
+        print(f"❌ 范围参数解析失败: {exc}")
+        return
+
+    if not fast_values:
+        fast_values = [base_strategy.fast]
+    if not slow_values:
+        slow_values = [base_strategy.slow]
+    if not rsi_values:
+        rsi_values = [base_strategy.rsi_long_min]
+    if not adx_values:
+        adx_values = [base_strategy.adx_min]
+
+    combos: List[Tuple[int, int, float, float]] = []
+    for fast, slow, rsi, adx in itertools.product(fast_values, slow_values, rsi_values, adx_values):
+        if fast >= slow:
+            continue
+        combos.append((fast, slow, rsi, adx))
+
+    if not combos:
+        print("❌ 未生成有效的参数组合，请检查范围设置")
+        return
+
+    print(f"🚀 启动优化，共 {len(combos)} 组组合")
+    records: List[Dict[str, Any]] = []
+    for idx, (fast, slow, rsi, adx) in enumerate(combos, start=1):
+        strategy = dataclasses.replace(
+            base_strategy,
+            fast=fast,
+            slow=slow,
+            rsi_long_min=rsi,
+            adx_min=adx,
+        )
+        backtester = Backtester(df, strategy, broker, args.interval)
+        result = backtester.run()
+        metrics = result.metrics
+        if not metrics:
+            continue
+        record = {
+            "fast": fast,
+            "slow": slow,
+            "rsi_long_min": rsi,
+            "adx_min": adx,
+        }
+        record.update(metrics)
+        records.append(record)
+        if args.verbose:
+            ret_pct = metrics.get("total_return", float("nan")) * 100
+            sharpe = metrics.get("sharpe", float("nan"))
+            print(
+                f"[{idx:>4}/{len(combos)}] fast={fast} slow={slow} rsi={rsi:.2f} adx={adx:.2f}"
+                f" -> 收益{ret_pct:+.2f}% 夏普{sharpe:.3f}"
+            )
+
+    if not records:
+        print("❌ 无有效回测结果")
+        return
+
+    sort_by = args.sort_by
+
+    def sort_value(item: Dict[str, Any]) -> float:
+        value = item.get(sort_by, float("-inf"))
+        if isinstance(value, float) and math.isnan(value):
+            return float("-inf")
+        return float(value)
+
+    records.sort(key=sort_value, reverse=True)
+
+    top_n = min(args.top, len(records))
+    print(f"🏁 完成优化，展示前 {top_n} 组（按 {sort_by} 降序）")
+    header = (
+        f"{'排名':<4}{'fast':>6}{'slow':>6}{'RSI':>8}{'ADX':>8}"
+        f"{'收益%':>10}{'夏普':>9}{'回撤%':>10}{'笔数':>8}"
+    )
+    print(header)
+    for rank, row in enumerate(records[:top_n], start=1):
+        total_return = row.get("total_return", float("nan")) * 100
+        max_dd = row.get("max_drawdown", float("nan")) * 100
+        sharpe = row.get("sharpe", float("nan"))
+        trades = row.get("trades", 0)
+        print(
+            f"{rank:<4}{row['fast']:>6}{row['slow']:>6}{row['rsi_long_min']:>8.2f}{row['adx_min']:>8.2f}"
+            f"{total_return:>10.2f}{sharpe:>9.3f}{max_dd:>10.2f}{trades:>8}"
+        )
+
+    if args.output:
+        ensure_outputs()
+        output_path = Path(args.output)
+        if not output_path.suffix:
+            output_path = output_path.with_suffix(".csv")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        df_out = pd.DataFrame(records)
+        df_out.to_csv(output_path, index=False)
+        print(f"💾 已保存 {len(records)} 条结果至 {output_path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器。"""
 
     parser = argparse.ArgumentParser("BTC量化回测(精简验证版)")
     sub = parser.add_subparsers(dest="cmd")
+    strategy_defaults = StrategyConfig()
+    broker_defaults = BrokerConfig()
     backtest = sub.add_parser("backtest", help="运行回测")
     backtest.add_argument("--symbol", default="BTCUSDT")
     backtest.add_argument("--interval", default="1h", choices=list(INTERVALS_MINUTES.keys()))
@@ -829,6 +1016,40 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--end")
     fetch.add_argument("--limit", type=int, default=1000, help="单次 API 拉取的最大 K 线数量")
     fetch.add_argument("--output", default="outputs/klines.csv", help="输出文件路径")
+
+    optimize = sub.add_parser("optimize", help="网格搜索策略参数")
+    optimize.add_argument("--symbol", default="BTCUSDT")
+    optimize.add_argument("--interval", default="1h", choices=list(INTERVALS_MINUTES.keys()))
+    optimize.add_argument("--lookback_days", type=int, default=365)
+    optimize.add_argument("--start")
+    optimize.add_argument("--end")
+    optimize.add_argument("--input_file", help="使用已下载的本地 K 线文件")
+    optimize.add_argument("--limit", type=int, default=1000, help="单次 API 拉取的最大 K 线数量")
+    optimize.add_argument("--fast", type=int, default=strategy_defaults.fast)
+    optimize.add_argument("--slow", type=int, default=strategy_defaults.slow)
+    optimize.add_argument("--rsi_long_min", type=float, default=strategy_defaults.rsi_long_min)
+    optimize.add_argument("--adx_min", type=float, default=strategy_defaults.adx_min)
+    optimize.add_argument("--cross_buffer_atr", type=float, default=strategy_defaults.cross_buffer_atr)
+    optimize.add_argument("--atr_sl_mult", type=float, default=strategy_defaults.atr_sl_mult)
+    optimize.add_argument("--atr_tp1_mult", type=float, default=strategy_defaults.atr_tp1_mult)
+    optimize.add_argument("--atr_tp2_mult", type=float, default=strategy_defaults.atr_tp2_mult)
+    optimize.add_argument("--tp1_pct", type=float, default=strategy_defaults.tp1_pct)
+    optimize.add_argument("--trail_mult", type=float, default=strategy_defaults.trail_mult)
+    optimize.add_argument("--risk_per_trade", type=float, default=strategy_defaults.risk_per_trade)
+    optimize.add_argument("--max_bars_in_trade", type=int, default=strategy_defaults.max_bars_in_trade)
+    optimize.add_argument("--day_stop_pct", type=float, default=strategy_defaults.day_stop_pct)
+    optimize.add_argument("--init_cash", type=float, default=broker_defaults.init_cash)
+    optimize.add_argument("--fee_rate", type=float, default=broker_defaults.fee_rate)
+    optimize.add_argument("--slippage_bp", type=float, default=broker_defaults.slippage_bp)
+    optimize.add_argument("--accounting", choices=["spot", "futures"], default=broker_defaults.accounting)
+    optimize.add_argument("--fast-range", help="快均线范围，格式 start:end:step 或以逗号分隔")
+    optimize.add_argument("--slow-range", help="慢均线范围，格式 start:end:step 或以逗号分隔")
+    optimize.add_argument("--rsi-range", help="RSI 门槛范围，格式 start:end:step 或以逗号分隔")
+    optimize.add_argument("--adx-range", help="ADX 门槛范围，格式 start:end:step 或以逗号分隔")
+    optimize.add_argument("--sort-by", choices=["total_return", "sharpe"], default="total_return")
+    optimize.add_argument("--top", type=int, default=10, help="打印排名前 N 名结果")
+    optimize.add_argument("--output", help="保存完整结果的 CSV 路径，例如 outputs/optimization.csv")
+    optimize.add_argument("--verbose", action="store_true", help="逐组合输出中间结果")
     return parser
 
 
@@ -876,6 +1097,8 @@ def main() -> None:
         run_backtest(args)
     elif args.cmd == "fetch":
         run_fetch(args)
+    elif args.cmd == "optimize":
+        run_optimize(args)
     else:
         parser.print_help()
 
