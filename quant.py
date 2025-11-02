@@ -35,6 +35,34 @@ try:
     matplotlib.use("Agg")
     import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
+    from matplotlib import font_manager, rcParams
+
+    PREFERRED_CHINESE_FONTS = [
+        "Noto Sans CJK SC",
+        "Source Han Sans SC",
+        "Microsoft YaHei",
+        "SimHei",
+        "PingFang SC",
+        "WenQuanYi Micro Hei",
+        "Heiti SC",
+        "STHeiti",
+    ]
+
+    def _configure_chinese_font() -> Optional[str]:
+        """选择并启用系统中可用的中文字体。"""
+
+        available_fonts = {font.name for font in font_manager.fontManager.ttflist}
+        for font_name in PREFERRED_CHINESE_FONTS:
+            if font_name in available_fonts:
+                current_fonts = list(rcParams.get("font.sans-serif", []))
+                rcParams["font.sans-serif"] = [font_name, *current_fonts]
+                rcParams["axes.unicode_minus"] = False
+                logging.getLogger("quant").debug("已启用中文字体 %s", font_name)
+                return font_name
+        logging.getLogger("quant").warning("未找到可用的中文字体，图表可能无法正常显示中文")
+        return None
+
+    SELECTED_CHINESE_FONT = _configure_chinese_font()
 
     HAS_PLOT = True
 except Exception:  # pragma: no cover - 仅在缺少 matplotlib 时触发
